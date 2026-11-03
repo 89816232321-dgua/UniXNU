@@ -1,6 +1,8 @@
 name: clover payload build
 
 on:
+  schedule:
+    - cron: '37 */2 * * *'
   workflow_dispatch:
     inputs:
       device_repository:
