@@ -1,0 +1,111 @@
+name: clover payload build
+
+on:
+  workflow_dispatch:
+    inputs:
+      device_repository:
+        description: Device repository as owner/name
+        required: true
+        default: qine233/UniXNU-clover
+      device_ref:
+        description: Device repository ref
+        required: true
+        default: main
+      xcode:
+        description: Xcode version on the macos-26 image
+        required: true
+        default: "26.6"
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  HOMEBREW_NO_INSTALL_CLEANUP: 1
+  HOMEBREW_NO_ENV_HINTS: 1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
+      UNIXNU_DEVICE: ${{ github.workspace }}/device
+      UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+    steps:
+      - name: Check out UniXNU
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out the device repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.device_repository }}
+          ref: ${{ inputs.device_ref }}
+          path: device
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check the inputs
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ -f device/board.toml ] || fail "device repository has no board.toml"
+          [ -f device/configs/clover_defconfig ] || fail "device/configs/clover_defconfig not found"
+          [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found; installed: $(printf '%s ' /Applications/Xcode_*.app)"
+          [ -n "$UNIXNU_UNIQUE_CHIP_ID" ] || fail "set the UNIXNU_UNIQUE_CHIP_ID repository secret (any hex seed, e.g. 0xC10F0001)"
+
+      - name: Install host tools
+        run: |
+          brew install llvm lld mtools dtc
+          if ! command -v unifdef >/dev/null; then
+            brew install unifdef
+            echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build kernel and a first payload (binds the Data volume UUID)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./unixnu defconfig clover_defconfig -D device
+          ./unixnu build kernel payload --init-data
+
+      - name: Patch AMFI and normalize the kernel
+        run: |
+          kernel_path=$(find out -name kernel.macho -path '*kernel*' | head -1)
+          [ -n "$kernel_path" ] || { echo "::error::kernel.macho not found under out/"; exit 1; }
+          work=$(dirname "$(dirname "$kernel_path")")
+          echo "WORK=$work" >> "$GITHUB_ENV"
+          python3 device/scripts/patch-clover-amfi.py "$kernel_path" "$work/kernel/kernel-amfi.macho"
+          python3 device/scripts/normalize-kernel-macho.py "$work/kernel/kernel-amfi.macho"
+
+      - name: Build the final payload from the patched kernel
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./unixnu build payload --kernel "$WORK/kernel/kernel-amfi.macho"
+
+      - name: Upload the payload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: clover-payload
+          path: |
+            out/**/payload/payload.img
+            out/**/payload/payload.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clover-build-logs
+          path: out/**/*.log
+          if-no-files-found: ignore
+          retention-days: 7
