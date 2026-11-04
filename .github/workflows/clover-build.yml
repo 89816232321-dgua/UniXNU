@@ -191,6 +191,7 @@ jobs:
           board.write_text(''.join(kept))
 
           config = Path('out/clover/.config')
+          stub = (Path('out/clover/seed-hooks') / 'libCloverSeedHooks.a').resolve()
           lines = config.read_text().splitlines(keepends=True)
           result, seen = [], set()
           for line in lines:
@@ -201,15 +202,29 @@ jobs:
                   line = '# CONFIG_XNU_SHENG_PMGR is not set\n'
                   seen.add('pmgr')
               elif line.startswith('CONFIG_XNU_EXTRA_LD_ARCHIVES='):
-                  line = 'CONFIG_XNU_EXTRA_LD_ARCHIVES=""\n'
+                  line = f'CONFIG_XNU_EXTRA_LD_ARCHIVES="{stub}"\n'
                   seen.add('extra')
               result.append(line)
           missing = {'display', 'pmgr', 'extra'} - seen
           if missing:
               raise SystemExit(f'{config}: missing {sorted(missing)}')
           config.write_text(''.join(result))
-          print('seed build: display, pmgr and block archives disabled; no extra driver archives')
+          print(f'seed build: driver archives disabled; only the ArmCpu hook stubs remain ({stub})')
           PY
+          stub_dir=out/clover/seed-hooks
+          mkdir -p "$stub_dir"
+          cat > "$stub_dir/clover_seed_hooks.c" <<'C'
+          typedef unsigned long long u64;
+          void clover_emmc_flight_beat (void) {}
+          void clover_imem_heartbeat (void) {}
+          void clover_emmc_flight_deadline (u64 seconds, u64 ticks, u64 cnt0, u64 cnt1, u64 freq) {
+            (void)seconds; (void)ticks; (void)cnt0; (void)cnt1; (void)freq;
+          }
+          C
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=17.0 -c \
+            "$stub_dir/clover_seed_hooks.c" -o "$stub_dir/clover_seed_hooks.o"
+          libtool -static -o "$stub_dir/libCloverSeedHooks.a" "$stub_dir/clover_seed_hooks.o"
+          nm -g "$stub_dir/libCloverSeedHooks.a"
           grep -c 'build-clover-gop-legacy-display.py\|build-clover-pmgr.py\|build-clover-block.py' device/board.toml || true
           grep -n 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY\|CONFIG_XNU_SHENG_PMGR\|CONFIG_XNU_EXTRA_LD_ARCHIVES' out/clover/.config
           ./unixnu build kernel
