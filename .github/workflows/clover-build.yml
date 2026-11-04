@@ -146,7 +146,7 @@ jobs:
           subprocess.run = run
           PY
           echo "PYTHONPATH=$diag${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
-          python3 -c "import sitecustomize, subprocess; print('wrapped', sitecustomize.run is subprocess.run)"
+          PYTHONPATH="$diag" python3 -c "import sitecustomize, subprocess; print('wrapped', sitecustomize.run is subprocess.run)"
 
       - name: Build a display-less seed kernel for the display archive
         env:
