@@ -14,9 +14,9 @@ on:
         required: true
         default: main
       xcode:
-        description: Xcode version on the macos-26 image
+        description: Xcode version to use, or auto for the newest 26.x on the image
         required: true
-        default: "26.6"
+        default: "auto"
 
 permissions:
   contents: read
@@ -35,9 +35,9 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 360
     env:
-      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
       UNIXNU_DEVICE: ${{ github.workspace }}/device
       UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+      XCODE_INPUT: ${{ inputs.xcode }}
     steps:
       - name: Check out UniXNU
         uses: actions/checkout@v4
@@ -56,11 +56,33 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Select the Xcode toolchain
+        run: |
+          if [ -n "${XCODE_INPUT:-}" ] && [ "$XCODE_INPUT" != "auto" ] \
+             && [ -d "/Applications/Xcode_${XCODE_INPUT}.app" ]; then
+            xcode_app="/Applications/Xcode_${XCODE_INPUT}.app"
+          else
+            xcode_app=$(printf '%s\n' /Applications/Xcode_26*.app 2>/dev/null | sort | tail -1)
+          fi
+          if [ -z "$xcode_app" ] || [ ! -d "$xcode_app/Contents/Developer" ]; then
+            echo "::error::no usable Xcode 26 found; installed:"
+            ls -d /Applications/Xcode_*.app || true
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode_app/Contents/Developer" >> "$GITHUB_ENV"
+          echo "selected $xcode_app"
+          "$xcode_app/Contents/Developer/usr/bin/xcodebuild" -version
+          DEVELOPER_DIR="$xcode_app/Contents/Developer" xcrun --sdk iphoneos --show-sdk-version
+          DEVELOPER_DIR="$xcode_app/Contents/Developer" xcrun --sdk iphoneos --find clang
+          DEVELOPER_DIR="$xcode_app/Contents/Developer" xcrun --sdk iphoneos --find mig
+          DEVELOPER_DIR="$xcode_app/Contents/Developer" xcrun --sdk iphoneos clang --version
+
       - name: Check the inputs
         run: |
           fail() { echo "::error::$1"; exit 1; }
           [ -f device/board.toml ] || fail "device repository has no board.toml"
           [ -f device/configs/clover_defconfig ] || fail "device/configs/clover_defconfig not found"
+          [ -n "${DEVELOPER_DIR:-}" ] || fail "DEVELOPER_DIR was not set by the Xcode step"
           [ -d "$DEVELOPER_DIR" ] || fail "Xcode not found; installed: $(printf '%s ' /Applications/Xcode_*.app)"
           [ -n "$UNIXNU_UNIQUE_CHIP_ID" ] || fail "set the UNIXNU_UNIQUE_CHIP_ID repository secret (any hex seed, e.g. 0xC10F0001)"
 
@@ -72,26 +94,45 @@ jobs:
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Build kernel and a first payload (binds the Data volume UUID)
+      - name: Provide the Mu-Silicium Font.h used by the entry probe
+        run: |
+          font_dir="$RUNNER_TEMP/uefi/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib"
+          mkdir -p "$font_dir"
+          url="https://raw.githubusercontent.com/Project-Silicium/Mu-Silicium/main/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib/Font.h"
+          curl -fsSL -o "$font_dir/Font.h" "$url" || \
+          curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+               -H "Accept: application/vnd.github.raw" \
+               -o "$font_dir/Font.h" \
+               "https://api.github.com/repos/Project-Silicium/Mu-Silicium/contents/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib/Font.h?ref=main"
+          [ -s "$font_dir/Font.h" ] || { echo "::error::could not fetch Font.h"; exit 1; }
+          echo "UNIXNU_UEFI=$RUNNER_TEMP/uefi" >> "$GITHUB_ENV"
+          wc -c "$font_dir/Font.h"
+
+      - name: Build the kernel
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./unixnu defconfig clover_defconfig -D device
-          ./unixnu build kernel payload --init-data
+          ./unixnu status -D device --json || true
+          ./unixnu build kernel
 
       - name: Patch AMFI and normalize the kernel
         run: |
-          kernel_path=$(find out -name kernel.macho -path '*kernel*' | head -1)
-          [ -n "$kernel_path" ] || { echo "::error::kernel.macho not found under out/"; exit 1; }
+          kernel_path=$(find out -type f -path '*/kernel/kernel.macho' | head -1)
+          [ -n "$kernel_path" ] || { echo "::error::kernel.macho not found under out/"; find out -name 'kernel*.macho'; exit 1; }
           work=$(dirname "$(dirname "$kernel_path")")
           echo "WORK=$work" >> "$GITHUB_ENV"
+          echo "kernel $kernel_path -> $work/kernel/kernel-amfi.macho"
           python3 device/scripts/patch-clover-amfi.py "$kernel_path" "$work/kernel/kernel-amfi.macho"
           python3 device/scripts/normalize-kernel-macho.py "$work/kernel/kernel-amfi.macho"
 
       - name: Build the final payload from the patched kernel
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: ./unixnu build payload --kernel "$WORK/kernel/kernel-amfi.macho"
+        run: |
+          ./unixnu build payload \
+            --kernel "$WORK/kernel/kernel-amfi.macho" \
+            --uefi "$UNIXNU_UEFI"
 
       - name: Upload the payload image
         uses: actions/upload-artifact@v4
