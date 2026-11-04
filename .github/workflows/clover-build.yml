@@ -122,11 +122,45 @@ jobs:
           PY
           grep -n "'NativeAES': 'software-aes'" device/scripts/build-arm-driver.py
 
-      - name: Build the kernel
+      - name: Build a display-less seed kernel for the display archive
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./unixnu defconfig clover_defconfig -D device
+          [ -f out/clover/.config ] || { echo "::error::out/clover/.config not found"; exit 1; }
+          cp device/board.toml device/board.toml.seed-backup
+          python3 - <<'PY'
+          from pathlib import Path
+
+          board = Path('device/board.toml')
+          lines = board.read_text().splitlines(keepends=True)
+          kept = [line for line in lines if line.strip() != '"build-clover-gop-legacy-display.py",']
+          if len(kept) == len(lines):
+              raise SystemExit('board.toml: display archive entry not found')
+          board.write_text(''.join(kept))
+
+          config = Path('out/clover/.config')
+          text = config.read_text()
+          flag = 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y'
+          if flag not in text:
+              raise SystemExit(f'{config}: {flag} not found')
+          config.write_text(text.replace(flag, '# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set'))
+          print('seed build: display archive and CONFIG_XNU_NATIVE_LEGACY_DISPLAY disabled')
+          PY
+          grep -c 'build-clover-gop-legacy-display.py' device/board.toml || true
+          grep -n 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY' out/clover/.config
+          ./unixnu build kernel
+          test -f out/clover/kernel/kernel.macho || { echo "::error::seed kernel.macho missing"; exit 1; }
+          ls -l out/clover/kernel/kernel.macho
+
+      - name: Restore the display archive and build the kernel with it
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mv device/board.toml.seed-backup device/board.toml
+          ./unixnu defconfig clover_defconfig -D device
+          grep -n 'CONFIG_XNU_NATIVE_LEGACY_DISPLAY' out/clover/.config
+          grep -n 'build-clover-gop-legacy-display.py' device/board.toml
           ./unixnu status -D device --json || true
           ./unixnu build kernel
 
