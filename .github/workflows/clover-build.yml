@@ -108,6 +108,20 @@ jobs:
           echo "UNIXNU_UEFI=$RUNNER_TEMP/uefi" >> "$GITHUB_ENV"
           wc -c "$font_dir/Font.h"
 
+      - name: Align the legacy device AES output with the core SoftwareAES paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('device/scripts/build-arm-driver.py')
+          source = path.read_text()
+          old = "'NativeAES': 'native-aes'"
+          if old not in source:
+              raise SystemExit(f'{path}: expected {old!r} not found')
+          path.write_text(source.replace(old, "'NativeAES': 'software-aes'"))
+          print(f'{path}: NativeAES now writes build/software-aes')
+          PY
+          grep -n "'NativeAES': 'software-aes'" device/scripts/build-arm-driver.py
+
       - name: Build the kernel
         env:
           GITHUB_TOKEN: ${{ github.token }}
