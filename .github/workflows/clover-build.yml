@@ -122,6 +122,32 @@ jobs:
           PY
           grep -n "'NativeAES': 'software-aes'" device/scripts/build-arm-driver.py
 
+      - name: Surface archived compile diagnostics
+        run: |
+          diag="$RUNNER_TEMP/pydiag"
+          mkdir -p "$diag"
+          cat > "$diag/sitecustomize.py" <<'PY'
+          import subprocess
+          import sys
+
+          _run = subprocess.run
+
+          def run(*args, **kwargs):
+              try:
+                  return _run(*args, **kwargs)
+              except subprocess.CalledProcessError as error:
+                  for stream in (error.stdout, error.stderr):
+                      if stream:
+                          if isinstance(stream, bytes):
+                              stream = stream.decode('utf-8', 'replace')
+                          sys.stderr.write(stream if stream.endswith('\n') else stream + '\n')
+                  raise
+
+          subprocess.run = run
+          PY
+          echo "PYTHONPATH=$diag${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
+          python3 -c "import sitecustomize, subprocess; print('wrapped', sitecustomize.run is subprocess.run)"
+
       - name: Build a display-less seed kernel for the display archive
         env:
           GITHUB_TOKEN: ${{ github.token }}
