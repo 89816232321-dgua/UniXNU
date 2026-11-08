@@ -92,19 +92,14 @@ jobs:
             echo "$(brew --prefix unifdef)/bin" >> "$GITHUB_PATH"
           fi
 
-      - name: Provide the Mu-Silicium Font.h used by the entry probe
+      - name: Clone Mu-Silicium at stable tag for UEFI support
         run: |
-          font_dir="$RUNNER_TEMP/uefi/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib"
-          mkdir -p "$font_dir"
-          url="https://raw.githubusercontent.com/Project-Silicium/Mu-Silicium/main/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib/Font.h"
-          curl -fsSL -o "$font_dir/Font.h" "$url" || \
-          curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
-               -H "Accept: application/vnd.github.raw" \
-               -o "$font_dir/Font.h" \
-               "https://api.github.com/repos/Project-Silicium/Mu-Silicium/contents/Silicon/Silicium/SiliciumPkg/Library/FrameBufferSerialPortLib/Font.h?ref=main"
-          [ -s "$font_dir/Font.h" ] || { echo "::error::could not fetch Font.h"; exit 1; }
-          echo "UNIXNU_UEFI=$RUNNER_TEMP/uefi" >> "$GITHUB_ENV"
-          wc -c "$font_dir/Font.h"
+          git clone --depth 1 --branch v4.1 https://github.com/Project-Silicium/Mu-Silicium.git "$RUNNER_TEMP/mu-silicium"
+          [ -d "$RUNNER_TEMP/mu-silicium/Resources/Scripts" ] || { echo "::error::Mu-Silicium missing Resources/Scripts"; exit 1; }
+          [ -f "$RUNNER_TEMP/mu-silicium/BootShim/BootShim.S" ] || { echo "::error::Mu-Silicium missing BootShim.S"; exit 1; }
+          echo "Cloned Mu-Silicium v4.1"
+          ls -la "$RUNNER_TEMP/mu-silicium/Resources/Scripts/"
+          echo "UNIXNU_UEFI=$RUNNER_TEMP/mu-silicium" >> "$GITHUB_ENV"
 
       - name: Align the legacy device AES output with the core SoftwareAES paths
         run: |
@@ -252,13 +247,25 @@ jobs:
           python3 device/scripts/patch-clover-amfi.py "$kernel_path" "$work/kernel/kernel-amfi.macho"
           python3 device/scripts/normalize-kernel-macho.py "$work/kernel/kernel-amfi.macho"
 
+      - name: Build UEFI firmware from Mu-Silicium v4.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          echo "Building UEFI firmware - this may take a while..."
+          ./unixnu build firmware --uefi "$UNIXNU_UEFI" --target RELEASE
+          fd_path="$UNIXNU_UEFI/Build/cloverPkg/RELEASE_CLANGPDB/FV/SILICIUM_UEFI.fd"
+          [ -f "$fd_path" ] || { echo "::error::UEFI fd not found: $fd_path"; exit 1; }
+          ls -lh "$fd_path"
+          echo "FD_PATH=$fd_path" >> "$GITHUB_ENV"
+
       - name: Build the final payload from the patched kernel
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./unixnu build payload \
             --kernel "$WORK/kernel/kernel-amfi.macho" \
-            --uefi "$UNIXNU_UEFI"
+            --uefi "$UNIXNU_UEFI" \
+            --fd "$FD_PATH"
 
       - name: Upload the payload image
         uses: actions/upload-artifact@v4
