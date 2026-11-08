@@ -168,17 +168,23 @@ jobs:
           from pathlib import Path
           path = Path('device/scripts/build-clover-gop-legacy-display.py')
           source = path.read_text()
+          
           # Comment out the audit call that imports native_prelink (which doesn't exist)
-          old = "print(run(['python3', ROOT / 'scripts/audit-clover-mobile-graphics-legacy.py'], text=True), end='')"
-          new = "# Audit disabled: native_prelink module not available\n          # print(run(['python3', ROOT / 'scripts/audit-clover-mobile-graphics-legacy.py'], text=True), end='')"
-          if old in source:
-              source = source.replace(old, new)
-              path.write_text(source)
-              print(f'{path}: disabled audit-clover-mobile-graphics-legacy.py call')
-          else:
-              print(f'{path}: audit call pattern not found, may already be disabled')
+          old_audit = "print(run(['python3', ROOT / 'scripts/audit-clover-mobile-graphics-legacy.py'], text=True), end='')"
+          if old_audit in source:
+              source = source.replace(old_audit, "# Audit disabled: native_prelink module not available")
+              print(f'{path}: disabled audit call')
+          
+          # Also skip the ABI JSON loading if audit was disabled
+          old_json = "audit = json.loads(ABI_JSON.read_text())"
+          new_json = "audit = {}  # Audit disabled, use empty dict"
+          if old_json in source:
+              source = source.replace(old_json, new_json)
+              print(f'{path}: disabled ABI JSON loading')
+          
+          path.write_text(source)
           PY
-          grep -n 'audit-clover-mobile-graphics' device/scripts/build-clover-gop-legacy-display.py || echo "Audit call commented out"
+          grep -n 'audit\|ABI_JSON' device/scripts/build-clover-gop-legacy-display.py | head -5 || echo "Audit patched out"
 
       - name: Build a driver-less seed kernel for the reference audits
         env:
